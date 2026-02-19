@@ -12,7 +12,7 @@ export class Plant extends Entity {
     this.daysToNextStage = this.getRandomGrowthTime();
   }
 
-  update(deltaTime: number) {
+  update(_deltaTime: number) {
     // Growth is handled by GameEngine day pass
   }
 
