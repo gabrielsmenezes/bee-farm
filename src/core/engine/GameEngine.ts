@@ -46,23 +46,23 @@ export class GameEngine {
 
   constructor() {
     this.eventBus = new EventBus();
-    this.grid = new Grid(20, 20);
+    this.grid = new Grid(30, 15);
     this.player = new Player("player-1", { x: 5, y: 5 });
 
     // Place a Shop Tile
-    this.grid.setTileType({ x: 2, y: 2 }, TileType.SHOP);
+    this.grid.setTileType({ x: 0, y: 0 }, TileType.SHOP);
 
     // Place Land Office
-    this.grid.setTileType({ x: 17, y: 2 }, TileType.LAND_OFFICE);
+    this.grid.setTileType({ x: 2, y: 0 }, TileType.LAND_OFFICE);
 
     // Place Harvester Tile
-    this.grid.setTileType({ x: 2, y: 5 }, TileType.HARVESTER);
+    this.grid.setTileType({ x: 4, y: 0 }, TileType.HARVESTER);
 
     // Place Auto Seeds Tile
-    this.grid.setTileType({ x: 2, y: 8 }, TileType.AUTO_SEEDS);
+    this.grid.setTileType({ x: 6, y: 0 }, TileType.AUTO_SEEDS);
 
     // Place Auto Plow Tile
-    this.grid.setTileType({ x: 2, y: 11 }, TileType.AUTO_PLOW);
+    this.grid.setTileType({ x: 8, y: 0 }, TileType.AUTO_PLOW);
 
     // Initialize Farmable Area (Centered at 10,10)
     this.updateFarmableArea();
@@ -155,19 +155,6 @@ export class GameEngine {
         console.error("Failed to load game save:", e);
       }
     }
-
-    // Force Static Map Tiles (to fix stale save data types)
-    console.log("Forcing Static Map Tiles...");
-    // Place a Shop Tile
-    this.grid.setTileType({ x: 2, y: 2 }, TileType.SHOP);
-    // Place Land Office
-    this.grid.setTileType({ x: 17, y: 2 }, TileType.LAND_OFFICE);
-    // Place Harvester Tile
-    this.grid.setTileType({ x: 2, y: 5 }, TileType.HARVESTER);
-    // Place Auto Seeds Tile
-    this.grid.setTileType({ x: 2, y: 8 }, TileType.AUTO_SEEDS);
-    // Place Auto Plow Tile
-    this.grid.setTileType({ x: 2, y: 11 }, TileType.AUTO_PLOW);
   }
 
   getState(): GameState {
@@ -460,8 +447,8 @@ export class GameEngine {
     // Level 1: 1 radius (3x3) or 2 radius?
     // User requested "start with 4 tiles" -> 2x2.
     // Let's implement concentric squares.
-    const centerX = 10;
-    const centerY = 10;
+    const centerX = 15;
+    const centerY = 5;
 
     // Size = expansionLevel * 2.
     // Level 1: 2x2. Range: -0 to +1
