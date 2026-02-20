@@ -8,6 +8,21 @@ export enum EntityType {
   PLANT = "PLANT",
 }
 
+export enum SeedType {
+  WHEAT = "WHEAT",
+  SUNFLOWER = "SUNFLOWER",
+  MUSHROOM = "MUSHROOM",
+  BLUEBERRY = "BLUEBERRY",
+  POISON_IVY = "POISON_IVY",
+  GOLDEN_SEED = "GOLDEN_SEED",
+}
+
+export enum PropertyType {
+  GREENHOUSE = "GREENHOUSE",
+  WATER_TOWER = "WATER_TOWER",
+  BEEHIVE = "BEEHIVE",
+}
+
 export enum TileType {
   GRASS = "GRASS",
   SOIL = "SOIL",
@@ -17,6 +32,9 @@ export enum TileType {
   HARVESTER = "HARVESTER",
   AUTO_SEEDS = "AUTO_SEEDS",
   AUTO_PLOW = "AUTO_PLOW",
+  GREENHOUSE = "GREENHOUSE",
+  WATER_TOWER = "WATER_TOWER",
+  BEEHIVE = "BEEHIVE",
 }
 
 export enum PlantStage {
@@ -36,15 +54,25 @@ export interface Tile {
   isFarmable: boolean;
 }
 
+export type SeedBag = Record<SeedType, number>;
+
 export interface Inventory {
-  seeds: number; // For now assuming 1 type of seed
+  seedBag: SeedBag;
   coins: number;
+  // Legacy: keep seeds for backward compat with save, mapped to WHEAT
+  seeds?: number;
+}
+
+export interface OwnedProperties {
+  greenhouse: boolean;
+  waterTower: boolean;
+  beehive: boolean;
 }
 
 export interface GameState {
   grid: Grid;
   day: number;
-  time: number; // 0-24? Or ticks? Let's say ticks for now.
+  time: number;
   entities: Record<string, Entity>;
   inventory: Inventory;
   nextLandCost: number;
@@ -56,6 +84,13 @@ export interface GameState {
   hasHarvester: boolean;
   hasAutoSeeds: boolean;
   hasAutoPlow: boolean;
+  ownedProperties: OwnedProperties;
+  selectedSeedType: SeedType;
+  isShopOpen: boolean;
+  /** Remaining monthly stock for limited seeds. Key = SeedType, value = units left this month. */
+  shopStock: Partial<Record<SeedType, number>>;
+  /** The in-game day when shopStock was last reset (start of the current "month"). */
+  shopStockResetDay: number;
 }
 
 export interface Entity {
@@ -69,11 +104,21 @@ export enum GameEvent {
   PLAYER_MOVED = "PLAYER_MOVED",
   TIME_TICK = "TIME_TICK",
   DAY_PASSED = "DAY_PASSED",
-  TRANSACTION = "TRANSACTION", // Added for UI feedback?
+  TRANSACTION = "TRANSACTION",
 }
 
 export type GameAction =
   | { type: "MOVE_PLAYER"; direction: Vector2 }
-  | { type: "INTERACT" } // Plant/Harvest
+  | { type: "INTERACT" }
   | { type: "TOGGLE_PAUSE" }
-  | { type: "SAVE_GAME" };
+  | { type: "SAVE_GAME" }
+  | { type: "BUY_SEED"; seedType: SeedType; quantity: number }
+  | { type: "SELECT_SEED"; seedType: SeedType }
+  | { type: "OPEN_SHOP" }
+  | { type: "CLOSE_SHOP" }
+  | { type: "BUY_LAND" }
+  | { type: "USE_HARVESTER" }
+  | { type: "BUY_HARVESTER" }
+  | { type: "BUY_AUTO_SEEDS" }
+  | { type: "BUY_AUTO_PLOW" }
+  | { type: "BUY_PROPERTY"; propertyType: PropertyType };

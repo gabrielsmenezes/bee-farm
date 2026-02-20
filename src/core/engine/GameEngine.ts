@@ -10,7 +10,22 @@ import {
   Vector2,
   TileType,
   PlantStage,
+  SeedType,
+  PropertyType,
+  SeedBag,
+  OwnedProperties,
 } from "../types";
+import { SEED_REGISTRY } from "../seedRegistry";
+import { PROPERTY_REGISTRY } from "../propertyRegistry";
+
+const ALL_SEED_TYPES = Object.values(SeedType);
+
+function makeEmptySeedBag(): SeedBag {
+  return ALL_SEED_TYPES.reduce((bag, type) => {
+    bag[type] = 0;
+    return bag;
+  }, {} as SeedBag);
+}
 
 export class GameEngine {
   private loop: GameLoop;
@@ -19,24 +34,24 @@ export class GameEngine {
   // State
   private grid: Grid;
   private player: Player;
-  private entities: Record<string, Plant | Player> = {}; // Generic Entity? For now Plant | Player
+  private entities: Record<string, Plant | Player> = {};
   private day: number = 1;
 
-  // Let's say day length is 24 seconds for demo? Or 1 minute?
-  // Let's use 0-100 as percentage of day for simplicity, or just raw ms.
   private timeOfDay: number = 0;
-  private readonly DAY_LENGTH = 5000; // 5 seconds per day for testing
+  private readonly DAY_LENGTH = 5000; // 5 seconds per day
 
   // Inventory
   private coins: number = 10;
-  private seeds: number = 0;
-  // Level 0: 2x2. Level 1: 4x4. etc.
+  private seedBag: SeedBag = makeEmptySeedBag();
   private expansionLevel: number = 1;
 
+  // Shop UI state
+  private isShopOpen: boolean = false;
+  private selectedSeedType: SeedType = SeedType.WHEAT;
+
   // Tax System
-  private readonly TAX_INTERVAL = 30; // Days
-  private readonly TAX_PER_TILE = 1; // 1 Coin per tile? Or per expansion level?
-  // Let's do per Farmable Tile.
+  private readonly TAX_INTERVAL = 30;
+  private readonly TAX_PER_TILE = 1;
   private nextTaxDay: number = 5;
 
   private isPaused: boolean = false;
@@ -44,27 +59,39 @@ export class GameEngine {
   private hasAutoSeeds: boolean = false;
   private hasAutoPlow: boolean = false;
 
+  // Property buildings
+  private ownedProperties: OwnedProperties = {
+    greenhouse: false,
+    waterTower: false,
+    beehive: false,
+  };
+
+  // Limited monthly shop stock
+  private shopStock: Partial<Record<SeedType, number>> = {};
+  private shopStockResetDay: number = 1;
+  private readonly SHOP_MONTH = 28; // days per "month"
+
+  /** Build the full shop stock from the seed registry (called on month reset). */
+  private buildShopStock(): Partial<Record<SeedType, number>> {
+    const stock: Partial<Record<SeedType, number>> = {};
+    Object.values(SEED_REGISTRY).forEach((cfg) => {
+      if (cfg.monthlyStock !== undefined) {
+        stock[cfg.type] = cfg.monthlyStock;
+      }
+    });
+    return stock;
+  }
+
   constructor() {
     this.eventBus = new EventBus();
     this.grid = new Grid(30, 15);
     this.player = new Player("player-1", { x: 5, y: 5 });
 
-    // Place a Shop Tile
-    this.grid.setTileType({ x: 0, y: 0 }, TileType.SHOP);
+    // Initialize shop stock from registry
+    this.shopStock = this.buildShopStock();
+    this.shopStockResetDay = 1;
 
-    // Place Land Office
-    this.grid.setTileType({ x: 2, y: 0 }, TileType.LAND_OFFICE);
-
-    // Place Harvester Tile
-    this.grid.setTileType({ x: 4, y: 0 }, TileType.HARVESTER);
-
-    // Place Auto Seeds Tile
-    this.grid.setTileType({ x: 6, y: 0 }, TileType.AUTO_SEEDS);
-
-    // Place Auto Plow Tile
-    this.grid.setTileType({ x: 8, y: 0 }, TileType.AUTO_PLOW);
-
-    // Initialize Farmable Area (Centered at 10,10)
+    // Initialize Farmable Area
     this.updateFarmableArea();
 
     this.entities[this.player.id] = this.player;
@@ -82,85 +109,80 @@ export class GameEngine {
     this.loop.stop();
   }
 
+  // ─── Save / Load ──────────────────────────────────────────────────────────
+
   private saveGame() {
     const state = this.getState();
-    const serializedState = JSON.stringify(state);
-    localStorage.setItem("bee-farm-save", serializedState);
-    console.log("Game Saved!");
+    localStorage.setItem("bee-farm-save", JSON.stringify(state));
     alert("Game Saved!");
   }
 
   private loadGame() {
     const savedStateParams = localStorage.getItem("bee-farm-save");
-    if (savedStateParams) {
-      try {
-        const savedState = JSON.parse(savedStateParams);
+    if (!savedStateParams) return;
 
-        // Restore Grid
-        this.grid = Grid.deserialize(savedState.grid);
+    try {
+      const s = JSON.parse(savedStateParams);
 
-        // Restore Simple Props
-        this.day = savedState.day;
-        this.timeOfDay = savedState.time; // Verify serialized name
-        this.coins = savedState.inventory.coins;
-        this.seeds = savedState.inventory.seeds;
-        this.expansionLevel =
-          Math.log2(savedState.nextLandCost / 10) + 1 ||
-          Math.log2(savedState.nextLandCost / 10) + 1; // Reverse eng or just store level?
-        // Note: expansionLevel wasn't explicitly in GameState interface, but nextLandCost was.
-        // Let's recalculate expansionLevel based on Land Cost or just add expansionLevel to GameState?
-        // For now, let's just infer it or better: Add it to GameState in next refactor?
-        // ACTUALLY, I missed adding expansionLevel to GameState.
-        // Let's rely on re-calculating or just defaults for now if not critical,
-        // BUT it is critical for farmable area.
-        // Let's see... getLandCost depends on expansionLevel.
-        // logic: cost = 10 * 2^(level-1). => level = log2(cost/10) + 1.
-        if (savedState.nextLandCost) {
-          this.expansionLevel = Math.log2(savedState.nextLandCost / 10) + 1;
-        }
+      this.grid = Grid.deserialize(s.grid);
+      this.day = s.day;
+      this.timeOfDay = s.time;
+      this.coins = s.inventory.coins;
 
-        this.nextTaxDay = savedState.tax.daysUntilDue + this.day;
-        this.isPaused = true; // Always pause on load? Or savedState.isPaused?
-        // savedState.isPaused might be true if they saved while paused.
-        // Let's force consistent state or use saved.
-        this.isPaused = savedState.isPaused;
-
-        this.hasHarvester = savedState.hasHarvester;
-        this.hasAutoSeeds = savedState.hasAutoSeeds;
-        this.hasAutoPlow = savedState.hasAutoPlow;
-
-        // Restore Entities
-        this.entities = {};
-        // Player
-        // We know player ID is in saved entities?
-        // Actually getState() saves all entities.
-        // We need to re-instantiate correct classes.
-        Object.values(savedState.entities).forEach((e: any) => {
-          if (e.type === "PLAYER") {
-            this.player = Player.deserialize(e);
-            this.entities[this.player.id] = this.player;
-          } else if (e.type === "PLANT") {
-            const plant = Plant.deserialize(e);
-            this.entities[plant.id] = plant;
-          }
-        });
-
-        // Ensure player exists (if save file was weird)
-        if (!this.entities[this.player.id]) {
-          this.entities[this.player.id] = this.player;
-        }
-
-        console.log("Game Loaded!");
-      } catch (e) {
-        console.error("Failed to load game save:", e);
+      // Migrate old saves: map legacy `seeds` (number) → WHEAT
+      if (s.inventory.seedBag) {
+        this.seedBag = { ...makeEmptySeedBag(), ...s.inventory.seedBag };
+      } else if (typeof s.inventory.seeds === "number") {
+        this.seedBag = makeEmptySeedBag();
+        this.seedBag[SeedType.WHEAT] = s.inventory.seeds;
       }
+
+      if (s.nextLandCost) {
+        this.expansionLevel = Math.round(Math.log2(s.nextLandCost / 10) + 1);
+      }
+
+      this.nextTaxDay = s.tax.daysUntilDue + this.day;
+      this.isPaused = s.isPaused ?? false;
+      this.hasHarvester = s.hasHarvester ?? false;
+      this.hasAutoSeeds = s.hasAutoSeeds ?? false;
+      this.hasAutoPlow = s.hasAutoPlow ?? false;
+      this.ownedProperties = s.ownedProperties ?? {
+        greenhouse: false,
+        waterTower: false,
+        beehive: false,
+      };
+      this.selectedSeedType = s.selectedSeedType ?? SeedType.WHEAT;
+      this.isShopOpen = false;
+
+      // Restore shop stock, or reinitialize if missing from old save
+      this.shopStock = s.shopStock ?? this.buildShopStock();
+      this.shopStockResetDay = s.shopStockResetDay ?? this.day;
+
+      this.entities = {};
+      Object.values(s.entities).forEach((e: any) => {
+        if (e.type === "PLAYER") {
+          this.player = Player.deserialize(e);
+          this.entities[this.player.id] = this.player;
+        } else if (e.type === "PLANT") {
+          const plant = Plant.deserialize(e);
+          this.entities[plant.id] = plant;
+        }
+      });
+
+      if (!this.entities[this.player.id]) {
+        this.entities[this.player.id] = this.player;
+      }
+    } catch (e) {
+      console.error("Failed to load game save:", e);
     }
   }
+
+  // ─── State ────────────────────────────────────────────────────────────────
 
   getState(): GameState {
     const serializedEntities: any = {};
     Object.values(this.entities).forEach((e) => {
-      serializedEntities[e.id] = { ...e }; // Shallow copy
+      serializedEntities[e.id] = { ...e };
     });
 
     return {
@@ -170,7 +192,7 @@ export class GameEngine {
       entities: serializedEntities,
       inventory: {
         coins: this.coins,
-        seeds: this.seeds,
+        seedBag: { ...this.seedBag },
       },
       nextLandCost: this.getLandCost(),
       tax: {
@@ -181,8 +203,15 @@ export class GameEngine {
       hasHarvester: this.hasHarvester,
       hasAutoSeeds: this.hasAutoSeeds,
       hasAutoPlow: this.hasAutoPlow,
+      ownedProperties: { ...this.ownedProperties },
+      selectedSeedType: this.selectedSeedType,
+      isShopOpen: this.isShopOpen,
+      shopStock: { ...this.shopStock },
+      shopStockResetDay: this.shopStockResetDay,
     };
   }
+
+  // ─── Dispatch ─────────────────────────────────────────────────────────────
 
   dispatch(action: GameAction) {
     switch (action.type) {
@@ -198,123 +227,108 @@ export class GameEngine {
       case "SAVE_GAME":
         this.saveGame();
         break;
+      case "BUY_SEED":
+        this.buySeed(action.seedType, action.quantity);
+        break;
+      case "SELECT_SEED":
+        this.selectedSeedType = action.seedType;
+        break;
+      case "OPEN_SHOP":
+        this.isShopOpen = true;
+        this.isPaused = true;
+        break;
+      case "CLOSE_SHOP":
+        this.isShopOpen = false;
+        this.isPaused = false;
+        break;
+      case "BUY_LAND":
+        this.buyLand();
+        break;
+      case "BUY_HARVESTER":
+        this.useHarvester();
+        break;
+      case "USE_HARVESTER":
+        this.harvestAll();
+        break;
+      case "BUY_AUTO_SEEDS":
+        this.buyAutoSeedsMachine();
+        break;
+      case "BUY_AUTO_PLOW":
+        this.buyAutoPlowMachine();
+        break;
+      case "BUY_PROPERTY":
+        this.buyProperty(action.propertyType);
+        break;
     }
     this.eventBus.emit(GameEvent.STATE_CHANGED, this.getState());
   }
+
+  // ─── Movement ─────────────────────────────────────────────────────────────
 
   private handleMove(direction: Vector2) {
     const newPos = {
       x: this.player.position.x + direction.x,
       y: this.player.position.y + direction.y,
     };
-
     if (this.grid.isValidPosition(newPos)) {
       this.player.position = newPos;
     }
   }
 
+  // ─── Interaction ──────────────────────────────────────────────────────────
+
   private handleInteract() {
     const pos = this.player.position;
     const tile = this.grid.getTile(pos);
-
     if (!tile) return;
 
-    // Check interaction with SHOP
-    if (tile.type === TileType.SHOP) {
-      this.buySeed();
-      return;
-    }
+    // Building tiles no longer exist on the grid — interactions handled by sidebar UI.
 
-    // Check interaction with LAND_OFFICE
-    if (tile.type === TileType.LAND_OFFICE) {
-      this.buyLand();
-      return;
-    }
-
-    // Check interaction with HARVESTER
-    if (tile.type === TileType.HARVESTER) {
-      this.useHarvester();
-      return;
-    }
-
-    // Check interaction with AUTO_SEEDS
-    if (tile.type === TileType.AUTO_SEEDS) {
-      this.buyAutoSeedsMachine();
-      return;
-    }
-
-    // Check interaction with AUTO_PLOW
-    if (tile.type === TileType.AUTO_PLOW) {
-      this.buyAutoPlowMachine();
-      return;
-    }
-
-    // Logic:
-    // If Grass -> Hoe to Soil (ONLY IF FARMABLE)
-    // If Soil -> Plant Seed
-    // If Plant (Mature) -> Harvest
-
-    // Check if there's a plant here
+    // Farm tile interaction
     const plantId = tile.entityId;
     if (plantId) {
       const plant = this.entities[plantId] as Plant;
       if (plant && plant.stage === PlantStage.MATURE) {
-        // Harvest
-        this.removeEntity(plantId);
-        tile.entityId = null;
-        tile.type = TileType.GRASS; // Revert to unplowed (Grass)
-
-        // Reward: Sell produce + Chance for Seed
-        const produceValue = 5;
-        this.coins += produceValue;
-
-        // 50% chance to get a seed back
-        if (Math.random() > 0.5) {
-          this.seeds += 1;
-        }
+        this.harvestPlant(plant, tile);
       }
     } else {
-      // No plant, check tile type
       if (tile.type === TileType.GRASS) {
         if (tile.isFarmable) {
           this.grid.setTileType(pos, TileType.SOIL);
-        } else {
-          // Feedback: Cannot farm here
-          console.log("Cannot farm here! Buy more land.");
         }
       } else if (tile.type === TileType.SOIL) {
-        // Plant seed
-        if (this.seeds > 0) {
-          const newPlant = new Plant(`plant-${Date.now()}`, { ...pos });
-          this.addEntity(newPlant);
-          tile.entityId = newPlant.id;
-          tile.type = TileType.WATERED_SOIL; // Auto water for demo?
-          this.seeds--;
-        } else {
-          // Feedback? "No seeds!"
-          console.log("Not enough seeds!");
-        }
+        this.plantSeed(pos, tile);
       }
     }
   }
 
-  private useHarvester() {
-    const HARVESTER_COST = 500;
+  // ─── Harvesting ───────────────────────────────────────────────────────────
 
-    if (!this.hasHarvester) {
-      // Try to buy
-      if (this.coins >= HARVESTER_COST) {
-        this.coins -= HARVESTER_COST;
-        this.hasHarvester = true;
-        console.log("Harvester Bought!");
-      } else {
-        console.log("Not enough coins to buy Harvester! Need 500.");
-      }
-    } else {
-      // Use Harvester
-      console.log("Using Harvester...");
-      this.harvestAll();
+  private harvestPlant(plant: Plant, tile: any) {
+    const cfg = SEED_REGISTRY[plant.seedType];
+    const buffs = this.getPropertyBuffsAt(plant.position);
+
+    // Value buff (Greenhouse)
+    const harvestValue = Math.round(cfg.harvestValue * buffs.valueMultiplier);
+    this.coins += harvestValue;
+
+    // Seed drop (Beehive buffed)
+    const effectiveSeedDropChance = Math.min(
+      1.0,
+      cfg.seedDropChance * buffs.seedDropMultiplier
+    );
+    if (Math.random() < effectiveSeedDropChance) {
+      this.seedBag[plant.seedType] = (this.seedBag[plant.seedType] ?? 0) + 1;
     }
+
+    // Poison Ivy: wilt adjacent plants
+    if (plant.seedType === SeedType.POISON_IVY) {
+      this.wiltNeighbors(plant.position);
+    }
+
+    this.removeEntity(plant.id);
+    tile.entityId = null;
+    tile.type = TileType.GRASS;
   }
 
   private harvestAll() {
@@ -322,114 +336,271 @@ export class GameEngine {
       if (entity instanceof Plant && entity.stage === PlantStage.MATURE) {
         const tile = this.grid.getTile(entity.position);
         if (tile) {
-          this.removeEntity(entity.id);
-          tile.entityId = null;
-          tile.type = TileType.GRASS; // Revert to unplowed (Grass)
-
-          // Reward: Sell produce + Chance for Seed
-          const produceValue = 5;
-          this.coins += produceValue;
-
-          // 50% chance to get a seed back
-          if (Math.random() > 0.5) {
-            this.seeds += 1;
-          }
+          this.harvestPlant(entity, tile);
         }
       }
     });
   }
 
-  private buyAutoSeedsMachine() {
-    const COST = 500;
-    if (!this.hasAutoSeeds) {
-      if (this.coins >= COST) {
-        this.coins -= COST;
-        this.hasAutoSeeds = true;
-        console.log("Auto Seeds Machine Bought!");
-      } else {
-        console.log("Not enough coins to buy Auto Seeds Machine! Need 500.");
+  private wiltNeighbors(pos: Vector2) {
+    const directions = [
+      { x: -1, y: 0 }, { x: 1, y: 0 },
+      { x: 0, y: -1 }, { x: 0, y: 1 },
+    ];
+    directions.forEach((d) => {
+      const neighborPos = { x: pos.x + d.x, y: pos.y + d.y };
+      const tile = this.grid.getTile(neighborPos);
+      if (tile?.entityId) {
+        const neighbor = this.entities[tile.entityId] as Plant;
+        if (neighbor instanceof Plant) {
+          neighbor.stage = PlantStage.DEAD;
+        }
+      }
+    });
+  }
+
+  // ─── Planting ─────────────────────────────────────────────────────────────
+
+  private plantSeed(pos: Vector2, tile: any) {
+    const seedType = this.selectedSeedType;
+    if ((this.seedBag[seedType] ?? 0) <= 0) {
+      console.log(`No ${seedType} seeds!`);
+      return;
+    }
+    const newPlant = new Plant(`plant-${Date.now()}`, { ...pos }, seedType);
+    this.addEntity(newPlant);
+    tile.entityId = newPlant.id;
+    tile.type = TileType.WATERED_SOIL;
+    this.seedBag[seedType]--;
+  }
+
+  // ─── Property Buff Lookup ─────────────────────────────────────────────────
+
+  /**
+   * Returns combined buff multipliers for a position based on
+   * owned property buildings within range.
+   */
+  private getPropertyBuffsAt(pos: Vector2): {
+    valueMultiplier: number;
+    growthSpeedMultiplier: number;
+    seedDropMultiplier: number;
+  } {
+    let valueMultiplier = 1.0;
+    let growthSpeedMultiplier = 1.0;
+    let seedDropMultiplier = 1.0;
+
+    const propertyTileMap: Array<{
+      tileType: TileType;
+      propType: PropertyType;
+      owned: boolean;
+    }> = [
+      {
+        tileType: TileType.GREENHOUSE,
+        propType: PropertyType.GREENHOUSE,
+        owned: this.ownedProperties.greenhouse,
+      },
+      {
+        tileType: TileType.WATER_TOWER,
+        propType: PropertyType.WATER_TOWER,
+        owned: this.ownedProperties.waterTower,
+      },
+      {
+        tileType: TileType.BEEHIVE,
+        propType: PropertyType.BEEHIVE,
+        owned: this.ownedProperties.beehive,
+      },
+    ];
+
+    propertyTileMap.forEach(({ propType, owned }) => {
+      if (!owned) return;
+      const cfg = PROPERTY_REGISTRY[propType];
+      const propPos = this.getPropertyPosition(propType);
+      if (!propPos) return;
+
+      const dist = Math.max(
+        Math.abs(pos.x - propPos.x),
+        Math.abs(pos.y - propPos.y)
+      );
+
+      if (dist <= cfg.radius) {
+        if (cfg.buffType === "VALUE") valueMultiplier *= cfg.buffMultiplier;
+        if (cfg.buffType === "GROWTH_SPEED")
+          growthSpeedMultiplier *= cfg.buffMultiplier;
+        if (cfg.buffType === "SEED_DROP")
+          seedDropMultiplier *= cfg.buffMultiplier;
+      }
+    });
+
+    return { valueMultiplier, growthSpeedMultiplier, seedDropMultiplier };
+  }
+
+  /** Returns the grid position of a property tile */
+  private getPropertyPosition(propType: PropertyType): Vector2 | null {
+    const rows = this.grid.serialize();
+    for (let y = 0; y < rows.length; y++) {
+      for (let x = 0; x < rows[y].length; x++) {
+        const tile = rows[y][x];
+        if (
+          (propType === PropertyType.GREENHOUSE &&
+            tile.type === TileType.GREENHOUSE) ||
+          (propType === PropertyType.WATER_TOWER &&
+            tile.type === TileType.WATER_TOWER) ||
+          (propType === PropertyType.BEEHIVE && tile.type === TileType.BEEHIVE)
+        ) {
+          return { x, y };
+        }
+      }
+    }
+    return null;
+  }
+
+  // ─── Machines ─────────────────────────────────────────────────────────────
+
+  private useHarvester() {
+    const HARVESTER_COST = 500;
+    if (!this.hasHarvester) {
+      if (this.coins >= HARVESTER_COST) {
+        this.coins -= HARVESTER_COST;
+        this.hasHarvester = true;
       }
     } else {
-      console.log("Auto Seeds Machine already active.");
+      this.harvestAll();
+    }
+  }
+
+  private buyAutoSeedsMachine() {
+    const COST = 500;
+    if (!this.hasAutoSeeds && this.coins >= COST) {
+      this.coins -= COST;
+      this.hasAutoSeeds = true;
     }
   }
 
   private runAutoSeeds() {
+    const cfg = SEED_REGISTRY[SeedType.WHEAT];
     const TARGET = 10;
-    const PRICE = 1;
     let bought = 0;
-
-    // Attempt to buy up to 10 seeds
     for (let i = 0; i < TARGET; i++) {
-      if (this.coins >= PRICE) {
-        this.coins -= PRICE;
-        this.seeds++;
+      if (this.coins >= cfg.cost) {
+        this.coins -= cfg.cost;
+        this.seedBag[SeedType.WHEAT] = (this.seedBag[SeedType.WHEAT] ?? 0) + 1;
         bought++;
       } else {
         break;
       }
     }
-
-    if (bought > 0) {
-      console.log(`Auto Seeds: Bought ${bought} seeds.`);
-    }
+    if (bought > 0) console.log(`Auto Seeds: Bought ${bought} wheat seeds.`);
   }
 
   private buyAutoPlowMachine() {
     const COST = 500;
-    if (!this.hasAutoPlow) {
-      if (this.coins >= COST) {
-        this.coins -= COST;
-        this.hasAutoPlow = true;
-        console.log("Auto Plow Machine Bought!");
-      } else {
-        console.log("Not enough coins to buy Auto Plow Machine! Need 500.");
-      }
-    } else {
-      console.log("Auto Plow Machine already active.");
+    if (!this.hasAutoPlow && this.coins >= COST) {
+      this.coins -= COST;
+      this.hasAutoPlow = true;
     }
   }
 
   private runAutoPlow() {
     const PLOW_COUNT = 10;
     let plowed = 0;
-
-    // Iterate through grid to find unplowed farmable tiles
-    // We can randomize or just scan top-down
     const rows = this.grid.serialize();
     for (let y = 0; y < rows.length; y++) {
       for (let x = 0; x < rows[y].length; x++) {
         if (plowed >= PLOW_COUNT) break;
-
         const tile = this.grid.getTile({ x, y });
         if (tile && tile.type === TileType.GRASS && tile.isFarmable) {
-          // Plow it
           this.grid.setTileType({ x, y }, TileType.SOIL);
           plowed++;
         }
       }
       if (plowed >= PLOW_COUNT) break;
     }
+  }
 
-    if (plowed > 0) {
-      console.log(`Auto Plow: Plowed ${plowed} tiles.`);
+  // ─── Properties ───────────────────────────────────────────────────────────
+
+  private buyProperty(propType: PropertyType) {
+    const cfg = PROPERTY_REGISTRY[propType];
+
+    if (this.coins < cfg.cost) {
+      console.log(`Not enough coins for ${cfg.name}! Need ${cfg.cost}.`);
+      return;
+    }
+
+    const pos = this.player.position;
+    const tile = this.grid.getTile(pos);
+
+    if (!tile) {
+      console.log("Invalid position.");
+      return;
+    }
+
+    // Don't allow placing on top of plants or existing buildings
+    if (tile.entityId) {
+      console.log("Can't place here — remove the plant first.");
+      return;
+    }
+    const buildingTypes: TileType[] = [
+      TileType.SHOP, TileType.LAND_OFFICE, TileType.HARVESTER,
+      TileType.AUTO_SEEDS, TileType.AUTO_PLOW,
+      TileType.GREENHOUSE, TileType.WATER_TOWER, TileType.BEEHIVE,
+    ];
+    if (buildingTypes.includes(tile.type)) {
+      console.log("Can't place here — already a building on this tile.");
+      return;
+    }
+
+    // Deduct cost and place the tile
+    this.coins -= cfg.cost;
+
+    const tileTypeMap: Record<PropertyType, TileType> = {
+      [PropertyType.GREENHOUSE]: TileType.GREENHOUSE,
+      [PropertyType.WATER_TOWER]: TileType.WATER_TOWER,
+      [PropertyType.BEEHIVE]: TileType.BEEHIVE,
+    };
+    this.grid.setTileType(pos, tileTypeMap[propType]);
+
+    // Update owned flags (tracks "at least one placed")
+    if (propType === PropertyType.GREENHOUSE) this.ownedProperties.greenhouse = true;
+    if (propType === PropertyType.WATER_TOWER) this.ownedProperties.waterTower = true;
+    if (propType === PropertyType.BEEHIVE) this.ownedProperties.beehive = true;
+
+    console.log(`${cfg.name} placed at (${pos.x}, ${pos.y})!`);
+  }
+
+  // ─── Seed Shop ────────────────────────────────────────────────────────────
+
+  private buySeed(seedType: SeedType, quantity: number) {
+    const cfg = SEED_REGISTRY[seedType];
+
+    // Enforce monthly stock limit for limited seeds
+    if (cfg.monthlyStock !== undefined) {
+      const remaining = this.shopStock[seedType] ?? 0;
+      if (remaining <= 0) {
+        console.log(`${cfg.name} is out of stock this month!`);
+        return;
+      }
+      // Cap quantity to what's available
+      const buyQty = Math.min(quantity, remaining);
+      const totalCost = cfg.cost * buyQty;
+      if (this.coins < totalCost) return;
+      this.coins -= totalCost;
+      this.seedBag[seedType] = (this.seedBag[seedType] ?? 0) + buyQty;
+      this.shopStock[seedType] = remaining - buyQty;
+      return;
+    }
+
+    // Unlimited seeds
+    const totalCost = cfg.cost * quantity;
+    if (this.coins >= totalCost) {
+      this.coins -= totalCost;
+      this.seedBag[seedType] = (this.seedBag[seedType] ?? 0) + quantity;
     }
   }
 
-  private buySeed() {
-    const SEED_COST = 1;
-    if (this.coins >= SEED_COST) {
-      this.coins -= SEED_COST;
-      this.seeds++;
-      // Maybe emit transaction event?
-    }
-  }
+  // ─── Land ─────────────────────────────────────────────────────────────────
 
   private getLandCost(): number {
-    // Exponential cost: 10 * 2^(level-1)
-    // Level 1 (start) -> Cost for Level 2 = 10 * 1 = 10
-    // Level 2 -> Cost for Level 3 = 10 * 2 = 20
-    // Level 3 -> Cost for Level 4 = 10 * 4 = 40
     return 10 * Math.pow(2, this.expansionLevel - 1);
   }
 
@@ -443,18 +614,8 @@ export class GameEngine {
   }
 
   private updateFarmableArea() {
-    // Center is roughly 10, 10.
-    // Level 1: 1 radius (3x3) or 2 radius?
-    // User requested "start with 4 tiles" -> 2x2.
-    // Let's implement concentric squares.
     const centerX = 15;
     const centerY = 5;
-
-    // Size = expansionLevel * 2.
-    // Level 1: 2x2. Range: -0 to +1
-    // Level 2: 4x4. Range: -1 to +2
-    // Level 3: 6x6. Range: -2 to +3
-
     const halfSize = this.expansionLevel;
     const startX = centerX - halfSize + 1;
     const endX = centerX + halfSize;
@@ -470,6 +631,8 @@ export class GameEngine {
     }
   }
 
+  // ─── Entity Management ────────────────────────────────────────────────────
+
   private addEntity(entity: Plant | Player) {
     this.entities[entity.id] = entity;
   }
@@ -478,28 +641,30 @@ export class GameEngine {
     delete this.entities[id];
   }
 
+  // ─── Day Cycle ────────────────────────────────────────────────────────────
+
   private dayPass() {
     this.day++;
     this.timeOfDay = 0;
 
-    // Grow plants
+    // Grow plants, applying Water Tower growth speed buff
     Object.values(this.entities).forEach((entity) => {
       if (entity instanceof Plant) {
-        entity.grow();
+        const buffs = this.getPropertyBuffsAt(entity.position);
+        entity.grow(buffs.growthSpeedMultiplier);
       }
     });
 
-    // Check for Auto Seeds
-    if (this.hasAutoSeeds) {
-      this.runAutoSeeds();
+    if (this.hasAutoSeeds) this.runAutoSeeds();
+    if (this.hasAutoPlow) this.runAutoPlow();
+
+    // Monthly shop stock reset every SHOP_MONTH days
+    if (this.day - this.shopStockResetDay >= this.SHOP_MONTH) {
+      this.shopStock = this.buildShopStock();
+      this.shopStockResetDay = this.day;
+      console.log("Shop stock refreshed for the new month!");
     }
 
-    // Check for Auto Plow
-    if (this.hasAutoPlow) {
-      this.runAutoPlow();
-    }
-
-    // Tax Check
     if (this.day >= this.nextTaxDay) {
       this.payTax();
       this.nextTaxDay += this.TAX_INTERVAL;
@@ -509,7 +674,6 @@ export class GameEngine {
   }
 
   private calculateTax(): number {
-    // Count farmable tiles
     let farmableCount = 0;
     this.grid.serialize().forEach((row) => {
       row.forEach((tile) => {
@@ -525,28 +689,20 @@ export class GameEngine {
     console.log(`Tax Day! Paid ${tax} coins.`);
   }
 
+  // ─── Game Loop ────────────────────────────────────────────────────────────
+
   private update(deltaTime: number) {
     if (this.isPaused) return;
 
-    // Update Time
     this.timeOfDay += deltaTime;
     if (this.timeOfDay >= this.DAY_LENGTH) {
       this.dayPass();
     }
 
-    // Update Entities
     Object.values(this.entities).forEach((entity) => {
       entity.update(deltaTime);
     });
 
-    // Emit 'tick' event if needed for smooth animations,
-    // but for React state we might want to throttle state updates?
-    // For now, let's emit every frame and let React handle it via subscriber or throttle in adapter.
-    // Or better: emit ONLY on significant changes?
-    // Player movement is event-driven (dispatch).
-    // Plant growth happens over time.
-    // Time changes every frame.
-    // We should emit STATE_CHANGED on tick.
     this.eventBus.emit(GameEvent.TIME_TICK, this.timeOfDay);
     this.eventBus.emit(GameEvent.STATE_CHANGED, this.getState());
   }
