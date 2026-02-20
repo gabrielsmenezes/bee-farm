@@ -3,6 +3,7 @@ import { GameLoop } from "./GameLoop";
 import { Grid } from "../world/Grid";
 import { Player } from "../entities/Player";
 import { Plant } from "../entities/Plant";
+import { Pest } from "../entities/Pest";
 import {
   GameState,
   GameEvent,
@@ -14,6 +15,7 @@ import {
   PropertyType,
   SeedBag,
   OwnedProperties,
+  EntityType,
 } from "../types";
 import { SEED_REGISTRY } from "../seedRegistry";
 import { PROPERTY_REGISTRY } from "../propertyRegistry";
@@ -34,7 +36,7 @@ export class GameEngine {
   // State
   private grid: Grid;
   private player: Player;
-  private entities: Record<string, Plant | Player> = {};
+  private entities: Record<string, Plant | Player | Pest> = {};
   private day: number = 1;
 
   private timeOfDay: number = 0;
@@ -64,7 +66,16 @@ export class GameEngine {
     greenhouse: false,
     waterTower: false,
     beehive: false,
+    scarecrow: false,
   };
+
+  // Pesticide consumable
+  private pesticides: number = 0;
+
+  // Threat system
+  private nextBlightDay: number = 5;   // first blight seed attempt
+  private nextBlightSpreadDay: number = 8;
+  private nextPestSpawnDay: number = 10;
 
   // Limited monthly shop stock
   private shopStock: Partial<Record<SeedType, number>> = {};
@@ -150,13 +161,24 @@ export class GameEngine {
         greenhouse: false,
         waterTower: false,
         beehive: false,
+        scarecrow: false,
       };
+      // Migrate saves missing scarecrow field
+      if (this.ownedProperties.scarecrow === undefined) {
+        this.ownedProperties.scarecrow = false;
+      }
+      this.pesticides = s.inventory?.pesticides ?? 0;
       this.selectedSeedType = s.selectedSeedType ?? SeedType.WHEAT;
       this.isShopOpen = false;
 
-      // Restore shop stock, or reinitialize if missing from old save
+      // Restore shop stock
       this.shopStock = s.shopStock ?? this.buildShopStock();
       this.shopStockResetDay = s.shopStockResetDay ?? this.day;
+
+      // Restore threat state
+      this.nextBlightDay = s.nextBlightDay ?? (this.day + 5);
+      this.nextBlightSpreadDay = s.nextBlightSpreadDay ?? (this.day + 8);
+      this.nextPestSpawnDay = s.nextPestSpawnDay ?? (this.day + 10);
 
       this.entities = {};
       Object.values(s.entities).forEach((e: any) => {
@@ -166,6 +188,9 @@ export class GameEngine {
         } else if (e.type === "PLANT") {
           const plant = Plant.deserialize(e);
           this.entities[plant.id] = plant;
+        } else if (e.type === EntityType.PEST) {
+          const pest = Pest.deserialize(e);
+          this.entities[pest.id] = pest;
         }
       });
 
@@ -193,6 +218,7 @@ export class GameEngine {
       inventory: {
         coins: this.coins,
         seedBag: { ...this.seedBag },
+        pesticides: this.pesticides,
       },
       nextLandCost: this.getLandCost(),
       tax: {
@@ -208,6 +234,10 @@ export class GameEngine {
       isShopOpen: this.isShopOpen,
       shopStock: { ...this.shopStock },
       shopStockResetDay: this.shopStockResetDay,
+      pestCount: Object.values(this.entities).filter((e) => e.type === EntityType.PEST).length,
+      hasActiveBlight: this.grid.serialize().some((row) =>
+        row.some((t) => t.type === TileType.BLIGHTED)
+      ),
     };
   }
 
@@ -259,6 +289,12 @@ export class GameEngine {
       case "BUY_PROPERTY":
         this.buyProperty(action.propertyType);
         break;
+      case "BUY_PESTICIDE":
+        this.buyPesticide(action.quantity);
+        break;
+      case "USE_PESTICIDE":
+        this.usePesticide();
+        break;
     }
     this.eventBus.emit(GameEvent.STATE_CHANGED, this.getState());
   }
@@ -282,7 +318,28 @@ export class GameEngine {
     const tile = this.grid.getTile(pos);
     if (!tile) return;
 
-    // Building tiles no longer exist on the grid — interactions handled by sidebar UI.
+    // Scare away any pest on the player's tile
+    const pestOnTile = Object.values(this.entities).find(
+      (e) => e.type === EntityType.PEST && e.position.x === pos.x && e.position.y === pos.y
+    );
+    if (pestOnTile) {
+      this.removeEntity(pestOnTile.id);
+      console.log("You scared the fox away!");
+      return;
+    }
+
+    // Clear blight (costs coins or consumes pesticide)
+    if (tile.type === TileType.BLIGHTED) {
+      if (this.pesticides > 0) {
+        this.usePesticide();
+      } else if (this.coins >= 8) {
+        this.coins -= 8;
+        this.clearBlightAt(pos);
+      } else {
+        console.log("Need 8 coins or a pesticide to clear blight!");
+      }
+      return;
+    }
 
     // Farm tile interaction
     const plantId = tile.entityId;
@@ -543,7 +600,7 @@ export class GameEngine {
     const buildingTypes: TileType[] = [
       TileType.SHOP, TileType.LAND_OFFICE, TileType.HARVESTER,
       TileType.AUTO_SEEDS, TileType.AUTO_PLOW,
-      TileType.GREENHOUSE, TileType.WATER_TOWER, TileType.BEEHIVE,
+      TileType.GREENHOUSE, TileType.WATER_TOWER, TileType.BEEHIVE, TileType.SCARECROW,
     ];
     if (buildingTypes.includes(tile.type)) {
       console.log("Can't place here — already a building on this tile.");
@@ -554,18 +611,51 @@ export class GameEngine {
     this.coins -= cfg.cost;
 
     const tileTypeMap: Record<PropertyType, TileType> = {
-      [PropertyType.GREENHOUSE]: TileType.GREENHOUSE,
+      [PropertyType.GREENHOUSE]:  TileType.GREENHOUSE,
       [PropertyType.WATER_TOWER]: TileType.WATER_TOWER,
-      [PropertyType.BEEHIVE]: TileType.BEEHIVE,
+      [PropertyType.BEEHIVE]:     TileType.BEEHIVE,
+      [PropertyType.SCARECROW]:   TileType.SCARECROW,
     };
     this.grid.setTileType(pos, tileTypeMap[propType]);
 
-    // Update owned flags (tracks "at least one placed")
-    if (propType === PropertyType.GREENHOUSE) this.ownedProperties.greenhouse = true;
-    if (propType === PropertyType.WATER_TOWER) this.ownedProperties.waterTower = true;
-    if (propType === PropertyType.BEEHIVE) this.ownedProperties.beehive = true;
+    // Update owned flags
+    if (propType === PropertyType.GREENHOUSE)  this.ownedProperties.greenhouse  = true;
+    if (propType === PropertyType.WATER_TOWER) this.ownedProperties.waterTower  = true;
+    if (propType === PropertyType.BEEHIVE)     this.ownedProperties.beehive     = true;
+    if (propType === PropertyType.SCARECROW)   this.ownedProperties.scarecrow   = true;
 
     console.log(`${cfg.name} placed at (${pos.x}, ${pos.y})!`);
+  }
+
+  // ─── Pesticide ────────────────────────────────────────────────────────────
+
+  private buyPesticide(qty: number) {
+    const cost = 20 * qty;
+    if (this.coins >= cost) {
+      this.coins -= cost;
+      this.pesticides += qty;
+    }
+  }
+
+  /** Clears blight on the player's tile and all 8 neighbors. */
+  private usePesticide() {
+    if (this.pesticides <= 0) return;
+    this.pesticides--;
+    const pos = this.player.position;
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        this.clearBlightAt({ x: pos.x + dx, y: pos.y + dy });
+      }
+    }
+    console.log("Pesticide used — blight cleared in area.");
+  }
+
+  private clearBlightAt(pos: Vector2) {
+    const tile = this.grid.getTile(pos);
+    if (!tile) return;
+    if (tile.type === TileType.BLIGHTED) {
+      this.grid.setTileType(pos, TileType.SOIL);
+    }
   }
 
   // ─── Seed Shop ────────────────────────────────────────────────────────────
@@ -658,6 +748,10 @@ export class GameEngine {
     if (this.hasAutoSeeds) this.runAutoSeeds();
     if (this.hasAutoPlow) this.runAutoPlow();
 
+    // ── Threat systems ────────────────────────────────────────────────
+    this.tickBlight();
+    this.tickPests();
+
     // Monthly shop stock reset every SHOP_MONTH days
     if (this.day - this.shopStockResetDay >= this.SHOP_MONTH) {
       this.shopStock = this.buildShopStock();
@@ -687,6 +781,197 @@ export class GameEngine {
     const tax = this.calculateTax();
     this.coins -= tax;
     console.log(`Tax Day! Paid ${tax} coins.`);
+  }
+
+  // ─── Blight System ────────────────────────────────────────────────────────
+
+  private tickBlight() {
+    // ── Seed new blight ───────────────────────────────────────────────
+    if (this.day >= this.nextBlightDay) {
+      this.nextBlightDay = this.day + 5;
+      const rows = this.grid.serialize();
+      rows.forEach((row, y) => {
+        row.forEach((tile, x) => {
+          if (tile.type !== TileType.SOIL && tile.type !== TileType.WATERED_SOIL) return;
+          // Greenhouse in range suppresses blight
+          const buffs = this.getPropertyBuffsAt({ x, y });
+          const inGreenhouseRange = buffs.valueMultiplier > 1.0;
+          const chance = inGreenhouseRange ? 0.03 : 0.10;
+          if (Math.random() < chance) {
+            // Kill plant on this tile if any
+            if (tile.entityId) {
+              const plant = this.entities[tile.entityId] as Plant;
+              if (plant instanceof Plant) {
+                plant.stage = PlantStage.DEAD;
+              }
+            }
+            this.grid.setTileType({ x, y }, TileType.BLIGHTED);
+          }
+        });
+      });
+      this.eventBus.emit(GameEvent.BLIGHT_SPREAD, this.day);
+    }
+
+    // ── Spread existing blight to neighbors ───────────────────────────
+    if (this.day >= this.nextBlightSpreadDay) {
+      this.nextBlightSpreadDay = this.day + 3;
+      const rows = this.grid.serialize();
+      const toSpread: Array<Vector2> = [];
+      rows.forEach((row, y) => {
+        row.forEach((tile, x) => {
+          if (tile.type === TileType.BLIGHTED) toSpread.push({ x, y });
+        });
+      });
+      const dirs = [{ x: 1, y: 0 }, { x: -1, y: 0 }, { x: 0, y: 1 }, { x: 0, y: -1 }];
+      toSpread.forEach((src) => {
+        // 40% chance to spread per turn
+        if (Math.random() > 0.40) return;
+        const dir = dirs[Math.floor(Math.random() * dirs.length)];
+        const target: Vector2 = { x: src.x + dir.x, y: src.y + dir.y };
+        const targetTile = this.grid.getTile(target);
+        if (!targetTile) return;
+        if (targetTile.type !== TileType.SOIL && targetTile.type !== TileType.WATERED_SOIL) return;
+        // Greenhouse suppresses spread into its radius
+        const buffs = this.getPropertyBuffsAt(target);
+        if (buffs.valueMultiplier > 1.0 && Math.random() < 0.7) return;
+        // Kill plant
+        if (targetTile.entityId) {
+          const plant = this.entities[targetTile.entityId] as Plant;
+          if (plant instanceof Plant) plant.stage = PlantStage.DEAD;
+        }
+        this.grid.setTileType(target, TileType.BLIGHTED);
+      });
+    }
+  }
+
+  // ─── Pest (Fox) System ────────────────────────────────────────────────────
+
+  /** Returns true if a given position is within any Scarecrow's radius */
+  private isInScarecrowZone(pos: Vector2): boolean {
+    const rows = this.grid.serialize();
+    for (let y = 0; y < rows.length; y++) {
+      for (let x = 0; x < rows[y].length; x++) {
+        if (rows[y][x].type !== TileType.SCARECROW) continue;
+        const cfg = PROPERTY_REGISTRY[PropertyType.SCARECROW];
+        const dist = Math.max(Math.abs(pos.x - x), Math.abs(pos.y - y));
+        if (dist <= cfg.radius) return true;
+      }
+    }
+    return false;
+  }
+
+  private tickPests() {
+    const cropCount = Object.values(this.entities).filter(
+      (e) => e instanceof Plant && (e as Plant).stage !== PlantStage.DEAD
+    ).length;
+
+    // ── Spawn new fox ─────────────────────────────────────────────────
+    if (this.day >= this.nextPestSpawnDay && cropCount > 0) {
+      // Spawn interval: faster as more crops exist (min 7 days)
+      const interval = Math.max(7, 10 - Math.floor(cropCount / 5));
+      this.nextPestSpawnDay = this.day + interval;
+
+      // Pick a random edge position
+      const gridW = this.grid.width;
+      const gridH = this.grid.height;
+      const edge = Math.floor(Math.random() * 4);
+      let spawnPos: Vector2;
+      if (edge === 0)       spawnPos = { x: Math.floor(Math.random() * gridW), y: 0 };
+      else if (edge === 1)  spawnPos = { x: Math.floor(Math.random() * gridW), y: gridH - 1 };
+      else if (edge === 2)  spawnPos = { x: 0, y: Math.floor(Math.random() * gridH) };
+      else                  spawnPos = { x: gridW - 1, y: Math.floor(Math.random() * gridH) };
+
+      // Don't spawn inside a Scarecrow zone
+      if (!this.isInScarecrowZone(spawnPos)) {
+        const pest = new Pest(`pest-${Date.now()}`, spawnPos);
+        this.entities[pest.id] = pest;
+        this.eventBus.emit(GameEvent.PEST_SPAWNED, spawnPos);
+        console.log(`A wild fox appeared at (${spawnPos.x}, ${spawnPos.y})!`);
+      }
+    }
+
+    // ── Move & act existing pests ─────────────────────────────────────
+    const pests = Object.values(this.entities).filter(
+      (e) => e instanceof Pest
+    ) as Pest[];
+
+    // Find all crop positions (targets for foxes)
+    let cropPositions: Vector2[] = Object.values(this.entities)
+      .filter((e) => e instanceof Plant && (e as Plant).stage !== PlantStage.DEAD)
+      .map((e) => e.position);
+
+    pests.forEach((pest) => {
+      // Beehive sting: if pest is in beehive range, tick sting counter
+      const buffs = this.getPropertyBuffsAt(pest.position);
+      if (buffs.seedDropMultiplier > 1.0) {
+        pest.beehiveStingTurns++;
+        if (pest.beehiveStingTurns >= 2) {
+          console.log("Bees stung the fox — it fled!");
+          this.removeEntity(pest.id);
+          return;
+        }
+      } else {
+        pest.beehiveStingTurns = 0;
+      }
+
+      // Move up to 3 tiles per day toward nearest crop
+      for (let stepIdx = 0; stepIdx < 3; stepIdx++) {
+        if (cropPositions.length === 0) {
+          // If no crops, wander randomly
+          const dirs = [
+            { x: 0, y: -1 }, { x: 0, y: 1 }, { x: -1, y: 0 }, { x: 1, y: 0 }
+          ];
+          const randomDir = dirs[Math.floor(Math.random() * dirs.length)];
+          const nextPos = { x: pest.position.x + randomDir.x, y: pest.position.y + randomDir.y };
+          if (this.grid.isValidPosition(nextPos) && !this.isInScarecrowZone(nextPos)) {
+            pest.position = nextPos;
+          }
+          continue; // Move to next step of the 3
+        }
+
+        let nearest = cropPositions[0];
+        let nearestDist = Math.abs(pest.position.x - nearest.x) + Math.abs(pest.position.y - nearest.y);
+        cropPositions.forEach((cp) => {
+          const d = Math.abs(pest.position.x - cp.x) + Math.abs(pest.position.y - cp.y);
+          if (d < nearestDist) { nearest = cp; nearestDist = d; }
+        });
+
+        const dx = nearest.x - pest.position.x;
+        const dy = nearest.y - pest.position.y;
+        if (dx === 0 && dy === 0) break; // Already on it
+
+        let step: Vector2 = { x: 0, y: 0 };
+        if (Math.abs(dx) >= Math.abs(dy)) step = { x: dx > 0 ? 1 : -1, y: 0 };
+        else step = { x: 0, y: dy > 0 ? 1 : -1 };
+
+        const newPos = { x: pest.position.x + step.x, y: pest.position.y + step.y };
+
+        if (!this.isInScarecrowZone(newPos) && this.grid.isValidPosition(newPos)) {
+          pest.position = newPos;
+
+          // Check if pest reached a crop tile — destroy it
+          const targetTile = this.grid.getTile(pest.position);
+          if (targetTile?.entityId) {
+            const plant = this.entities[targetTile.entityId] as Plant;
+            if (plant instanceof Plant) {
+              console.log(`Fox destroyed a ${plant.seedType} plant!`);
+              this.removeEntity(plant.id);
+              targetTile.entityId = null;
+              targetTile.type = TileType.SOIL;
+              // Remove this crop from the list so we don't keep targeting the dead crop
+              cropPositions = cropPositions.filter(cp => cp.x !== pest.position.x || cp.y !== pest.position.y);
+            }
+          }
+
+          // Check if pest is on the player's tile — scare it away
+          if (pest.position.x === this.player.position.x && pest.position.y === this.player.position.y) {
+            console.log("Fox ran into the farmer and fled!");
+            this.removeEntity(pest.id);
+            break; // Stop stepping, it's dead
+          }
+        }
+      }
+    });
   }
 
   // ─── Game Loop ────────────────────────────────────────────────────────────

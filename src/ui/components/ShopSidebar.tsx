@@ -292,9 +292,10 @@ const UpgradesTab: React.FC<{
 
 const PropertiesTab: React.FC<{
   coins: number;
+  pesticides: number;
   ownedProperties: OwnedProperties;
   dispatch: (action: GameAction) => void;
-}> = ({ coins, ownedProperties, dispatch }) => (
+}> = ({ coins, pesticides, ownedProperties, dispatch }) => (
   <div className="flex flex-col gap-2">
     {/* Placement tip */}
     <div className="flex items-start gap-2 p-2.5 rounded-lg bg-blue-500/10 border border-blue-500/20 text-[10px] text-blue-300">
@@ -306,11 +307,44 @@ const PropertiesTab: React.FC<{
       </span>
     </div>
 
+    {/* Pesticide consumable */}
+    <div className="flex items-start gap-3 p-3 rounded-xl border-2 border-red-700/50 bg-red-900/10">
+      <div className="text-2xl shrink-0 mt-0.5">🧪</div>
+      <div className="flex-1 min-w-0">
+        <div className="font-bold text-white text-sm">Pesticide</div>
+        <div className="text-[10px] text-slate-400 leading-snug mt-0.5">
+          Clears blight on your tile and all 8 neighbors instantly. Walk to
+          blighted soil and interact to use.
+        </div>
+        <div className="text-[10px] text-red-400 font-bold mt-1">
+          In bag: {pesticides} 🧪
+        </div>
+      </div>
+      <div className="shrink-0 flex flex-col gap-1">
+        {[1, 3].map((qty) => {
+          const cost = 20 * qty;
+          const ok = coins >= cost;
+          return (
+            <button
+              key={qty}
+              onClick={() => dispatch({ type: "BUY_PESTICIDE", quantity: qty })}
+              disabled={!ok}
+              className={`px-2 py-1 rounded-lg text-[11px] font-bold transition-all whitespace-nowrap
+                ${ok ? "bg-red-600 hover:bg-red-500 text-white active:scale-95" : "bg-slate-700 text-slate-500 cursor-not-allowed"}`}
+            >
+              ×{qty} — {cost}🪙
+            </button>
+          );
+        })}
+      </div>
+    </div>
+
     {Object.values(PROPERTY_REGISTRY).map((cfg) => {
       const owned =
         (cfg.type === PropertyType.GREENHOUSE && ownedProperties.greenhouse) ||
         (cfg.type === PropertyType.WATER_TOWER && ownedProperties.waterTower) ||
-        (cfg.type === PropertyType.BEEHIVE && ownedProperties.beehive);
+        (cfg.type === PropertyType.BEEHIVE && ownedProperties.beehive) ||
+        (cfg.type === PropertyType.SCARECROW && ownedProperties.scarecrow);
 
       return (
         <div
@@ -341,6 +375,8 @@ const PropertiesTab: React.FC<{
                   `-${Math.round((1 - cfg.buffMultiplier) * 100)}% Growth Time`}
                 {cfg.buffType === "SEED_DROP" &&
                   `+${Math.round((cfg.buffMultiplier - 1) * 100)}% Seed Drop`}
+                {cfg.buffType === "DEFENSE" &&
+                  `Pest Repellent — radius ${cfg.radius}`}
               </span>
             </div>
             {owned && (
@@ -444,6 +480,7 @@ export const ShopSidebar: React.FC<Props> = ({ gameState, dispatch }) => {
         {activeTab === "properties" && (
           <PropertiesTab
             coins={gameState.inventory.coins}
+            pesticides={gameState.inventory.pesticides ?? 0}
             ownedProperties={gameState.ownedProperties}
             dispatch={dispatch}
           />

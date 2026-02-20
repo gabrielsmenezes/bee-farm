@@ -38,6 +38,7 @@ export const useInput = (dispatch: (action: GameAction) => void) => {
           dispatch({ type: "INTERACT" });
           break;
       }
+
     };
 
     window.addEventListener("keydown", handleKeyDown);

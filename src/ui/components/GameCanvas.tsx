@@ -105,6 +105,34 @@ export const GameCanvas: React.FC = () => {
                 🐝
               </span>
             )}
+            {gameState.ownedProperties?.scarecrow && (
+              <span title="Scarecrow" className="text-base">
+                🎃
+              </span>
+            )}
+          </div>
+
+          <div className="h-8 w-[1px] bg-white/15" />
+
+          {/* Threat Alerts */}
+          <div className="flex gap-2 items-center">
+            {gameState.hasActiveBlight && (
+              <div className="flex items-center gap-1.5 px-2 py-1 rounded-full bg-purple-900/50 border border-purple-500/30 animate-pulse">
+                <span className="text-sm">☠️</span>
+                <span className="text-[10px] font-bold text-purple-300 uppercase tracking-wide">
+                  Blight Active
+                </span>
+              </div>
+            )}
+            {(gameState.pestCount ?? 0) > 0 && (
+              <div className="flex items-center gap-1.5 px-2 py-1 rounded-full bg-orange-900/50 border border-orange-500/30 animate-pulse">
+                <span className="text-sm">🦊</span>
+                <span className="text-[10px] font-bold text-orange-300 uppercase tracking-wide">
+                  {gameState.pestCount} Fox{gameState.pestCount > 1 ? "es" : ""}
+                  !
+                </span>
+              </div>
+            )}
           </div>
 
           {/* Spacer */}

@@ -390,6 +390,7 @@ export const TileRenderer: React.FC<Props> = ({
   const isGrass = tile.type === TileType.GRASS;
   const isSoil = tile.type === TileType.SOIL;
   const isWatered = tile.type === TileType.WATERED_SOIL;
+  const isBlighted = tile.type === TileType.BLIGHTED;
   const isShop = tile.type === TileType.SHOP;
   const isLandOffice = tile.type === TileType.LAND_OFFICE;
   const isHarvester = tile.type === TileType.HARVESTER;
@@ -398,6 +399,7 @@ export const TileRenderer: React.FC<Props> = ({
   const isGreenhouse = tile.type === TileType.GREENHOUSE;
   const isWaterTower = tile.type === TileType.WATER_TOWER;
   const isBeehive = tile.type === TileType.BEEHIVE;
+  const isScarecrow = tile.type === TileType.SCARECROW;
 
   const isFarmable = tile.isFarmable;
   const isBuilding =
@@ -408,7 +410,8 @@ export const TileRenderer: React.FC<Props> = ({
     isAutoPlow ||
     isGreenhouse ||
     isWaterTower ||
-    isBeehive;
+    isBeehive ||
+    isScarecrow;
 
   let tooltipText = "";
   let tooltipSubtext = "";
@@ -452,6 +455,16 @@ export const TileRenderer: React.FC<Props> = ({
     tooltipSubtext = ownedProperties?.beehive
       ? `Active: ${cfg.description}`
       : `${cfg.description} Cost: ${cfg.cost} Coins.`;
+  } else if (isScarecrow) {
+    const cfg = PROPERTY_REGISTRY[PropertyType.SCARECROW];
+    tooltipText = cfg.name;
+    tooltipSubtext = ownedProperties?.scarecrow
+      ? `Active: ${cfg.description}`
+      : `${cfg.description} Cost: ${cfg.cost} Coins.`;
+  } else if (isBlighted) {
+    tooltipText = "⚠️ Blighted Soil";
+    tooltipSubtext =
+      "Blight! Plants die here. Walk here + Space to clear (8🪙) or use Pesticide.";
   }
 
   return (
@@ -460,6 +473,7 @@ export const TileRenderer: React.FC<Props> = ({
         relative w-12 h-12 shrink-0 group
         ${isGrass && isFarmable ? "bg-[#76bc64]" : ""}
         ${isGrass && !isFarmable ? "bg-[#406836] grayscale-[0.5]" : ""}
+        ${isBlighted ? "bg-purple-950" : ""}
         ${isBuilding ? "bg-[#5c4033]" : ""}
         transition-colors duration-500
       `}
@@ -468,6 +482,36 @@ export const TileRenderer: React.FC<Props> = ({
       {/* Base Texture */}
       {isGrass && <GrassTexture />}
       {(isSoil || isWatered) && <SoilTexture watered={isWatered} />}
+      {isBlighted && (
+        <div className="absolute inset-0 flex items-center justify-center animate-pulse">
+          <div className="absolute inset-0 bg-purple-900/60" />
+          <svg
+            className="absolute inset-0 w-full h-full opacity-30"
+            viewBox="0 0 48 48"
+          >
+            {/* cracked ground lines */}
+            <polyline
+              points="8,40 16,28 12,20"
+              stroke="#a855f7"
+              strokeWidth="1.5"
+              fill="none"
+            />
+            <polyline
+              points="24,44 28,32 36,24"
+              stroke="#a855f7"
+              strokeWidth="1.5"
+              fill="none"
+            />
+            <polyline
+              points="4,24 14,32 10,38"
+              stroke="#7c3aed"
+              strokeWidth="1"
+              fill="none"
+            />
+          </svg>
+          <span className="text-lg z-10 drop-shadow-lg">☠️</span>
+        </div>
+      )}
 
       {/* Building Visuals */}
       {isShop && <ShopVisual />}
@@ -491,6 +535,12 @@ export const TileRenderer: React.FC<Props> = ({
         <PropertyVisual
           propType={PropertyType.BEEHIVE}
           isOwned={!!ownedProperties?.beehive}
+        />
+      )}
+      {isScarecrow && (
+        <PropertyVisual
+          propType={PropertyType.SCARECROW}
+          isOwned={!!ownedProperties?.scarecrow}
         />
       )}
 

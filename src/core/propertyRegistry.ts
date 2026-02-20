@@ -1,6 +1,6 @@
 import { PropertyType } from "./types";
 
-export type BuffType = "VALUE" | "GROWTH_SPEED" | "SEED_DROP";
+export type BuffType = "VALUE" | "GROWTH_SPEED" | "SEED_DROP" | "DEFENSE";
 
 export interface PropertyConfig {
   type: PropertyType;
@@ -8,8 +8,8 @@ export interface PropertyConfig {
   emoji: string;
   cost: number;
   buffType: BuffType;
-  buffMultiplier: number; 
-  radius: number;         
+  buffMultiplier: number;
+  radius: number;
   description: string;
   color: string;
 }
@@ -23,7 +23,7 @@ export const PROPERTY_REGISTRY: Record<PropertyType, PropertyConfig> = {
     buffType: "VALUE",
     buffMultiplier: 1.5,
     radius: 1,
-    description: "+50% harvest value for adjacent plants.",
+    description: "+50% harvest value for adjacent plants. Also reduces blight chance in range.",
     color: "#22c55e",
   },
   [PropertyType.WATER_TOWER]: {
@@ -45,7 +45,18 @@ export const PROPERTY_REGISTRY: Record<PropertyType, PropertyConfig> = {
     buffType: "SEED_DROP",
     buffMultiplier: 1.5,
     radius: 1,
-    description: "+50% seed drop chance for adjacent plants.",
+    description: "+50% seed drop chance. Bees sting pests — foxes that linger flee after 2 turns.",
     color: "#fbbf24",
+  },
+  [PropertyType.SCARECROW]: {
+    type: PropertyType.SCARECROW,
+    name: "Scarecrow",
+    emoji: "🎃",
+    cost: 150,
+    buffType: "DEFENSE",
+    buffMultiplier: 1,
+    radius: 4,
+    description: "Pests avoid all tiles within radius 4. Place several to cover the whole farm.",
+    color: "#f97316",
   },
 };
